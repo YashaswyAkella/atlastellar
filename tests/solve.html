@@ -1,0 +1,52 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Atlastellar solver tests</title>
+<style>
+  body { font: 13px/1.5 ui-monospace, Menlo, monospace; background: #0b0d12; color: #dde; padding: 20px; }
+  table { border-collapse: collapse; } td, th { padding: 3px 10px; text-align: right; border-bottom: 1px solid #223; }
+  td:first-child, th:first-child { text-align: left; } .ok { color: #7ddc9a; } .bad { color: #ff8a7a; } .skip { color: #ffc857; }
+</style>
+<h1>Solver tests</h1>
+<p>Make test photos with <code>python3 tools/make_test_photo.py --help</code>, then reload. Each photo is solved from a hint
+placed <b>off</b> the true centre, once with the field width known and once without. Photos with fewer than 6 catalogue
+stars are expected to fail cleanly.</p>
+<table id="t"><tr><th>photo</th><th>mode</th><th>result</th><th>centre err</th><th>width err</th><th>rot err</th><th>mirror</th><th>matched</th><th>time</th></tr></table>
+<pre id="summary"></pre>
+<script type="module">
+  import { solveImage } from '../js/solve/index.js';
+  import { vec, sep } from '../js/math.js';
+  const table = document.getElementById('t'), rows = [];
+  const params = new URLSearchParams(location.search), only = params.get('only');
+  // ?set=real runs photographs of the real sky kept in raw/real (same index.json format) instead of raw/test.
+  const dir = `../raw/${params.get('set') === 'real' ? 'real' : 'test'}`;
+  const truths = (await (await fetch(`${dir}/index.json`)).json()).filter((t) => !only || t.file.includes(only));
+  for (const t of truths) {
+    const blob = await (await fetch(`${dir}/${t.file}`)).blob();
+    for (const known of [true, false]) {
+      // Hint: a third of a field away from the true centre, as if the target were off-centre in the frame.
+      const hint = vec(t.ra + (0.3 * t.fovW) / Math.cos((t.dec * Math.PI) / 180), t.dec - 0.2 * t.fovW);
+      const row = { file: t.file, known, expectFail: t.catalogueStars < 6 };
+      const t0 = performance.now();
+      try {
+        const r = await solveImage(blob, { hint, fov: known ? t.fovW * 1.04 : 3, fovKnown: known });
+        row.centre = sep(vec(r.ra, r.dec), vec(t.ra, t.dec)) / t.fovW;         // fraction of the field width
+        row.width = Math.abs(r.fovW / t.fovW - 1);
+        row.rot = Math.abs(((r.rot - t.rot + 540) % 360) - 180);
+        row.flipOk = r.flip === t.flip; row.matched = r.matched;
+        const tol = t.real ? 3 : 1; // survey plates carry their own small astrometric errors
+        row.pass = row.centre < 0.004 * tol && row.width < 0.004 * tol && row.rot < 0.25 * tol && row.flipOk;
+      } catch (err) { row.error = err.message; row.detail = err.detail; row.pass = row.expectFail; }
+      row.ms = Math.round(performance.now() - t0);
+      rows.push(row);
+      const tr = table.insertRow();
+      const cls = row.pass ? (row.error ? 'skip' : 'ok') : 'bad';
+      const cells = [row.file, known ? 'width known' : 'width unknown', row.error ? (row.expectFail ? 'failed (expected)' : 'FAILED') : row.pass ? 'ok' : 'WRONG',
+        row.error ? '' : (row.centre * 100).toFixed(3) + '%', row.error ? '' : (row.width * 100).toFixed(3) + '%', row.error ? '' : row.rot.toFixed(3) + '°',
+        row.error ? '' : row.flipOk ? 'ok' : 'WRONG', row.matched ?? '', row.ms + ' ms'];
+      cells.forEach((c, i) => { const td = tr.insertCell(); td.textContent = c; if (i === 2) td.className = cls; });
+    }
+  }
+  const bad = rows.filter((r) => !r.pass);
+  document.getElementById('summary').textContent = `DONE ${rows.length - bad.length}/${rows.length} as expected` + (bad.length ? '\n' + bad.map((r) => `${r.file} [${r.known ? 'known' : 'unknown'}]: ${r.error || 'wrong answer'}\n    ${r.detail || ''}`).join('\n') : '');
+  window.results = rows;
+</script>
